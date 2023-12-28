@@ -36,6 +36,7 @@ from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                ReplicatedLinear,
+                                               ReplicatedLinearNoBias,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -110,6 +111,7 @@ class MixtralMoE(nn.Module):
         self.moe_use_mixtral_gating = config.moe_use_mixtral_gating
         self.moe_use_logits_norm = config.moe_use_logits_norm
         self.moe_gate_norm_std = config.moe_gate_norm_std
+        self.moe_2layer_gate = config.moe_2layer_gate
         if self.tp_size > self.num_total_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -129,11 +131,11 @@ class MixtralMoE(nn.Module):
             if idx in self.expert_indicies else None
             for idx in range(self.num_total_experts)
         ])
-        if config.moe_2layer_gate:
+        if self.moe_2layer_gate:
             self.gate = torch.nn.Sequential(
-                ReplicatedLinear(config.hidden_size, self.num_total_experts * 8, bias=False).float(),
+                ReplicatedLinearNoBias(config.hidden_size, self.num_total_experts * 8, linear_method=None).float(),
                 torch.nn.Tanh(),
-                ReplicatedLinear(self.num_total_experts * 8, self.num_total_experts, bias=False).float()).float()
+                ReplicatedLinearNoBias(self.num_total_experts * 8, self.num_total_experts, linear_method=None).float()).float()
         else:
             self.gate = ReplicatedLinear(config.hidden_size,
                                         self.num_total_experts,
@@ -143,8 +145,12 @@ class MixtralMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        hidden_states_fp32 = hidden_states.float()
         # router_logits: (batch * sequence_length, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        if self.moe_2layer_gate:
+            router_logits = self.gate(hidden_states_fp32)
+        else:
+            router_logits, _ = self.gate(hidden_states_fp32)
 
         if self.moe_use_mixtral_gating:
             routing_weights, selected_experts = torch.topk(router_logits, k=MOE_TOP_K, dim=1)

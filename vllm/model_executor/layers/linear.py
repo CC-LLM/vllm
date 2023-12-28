@@ -126,6 +126,44 @@ class ReplicatedLinear(torch.nn.Module):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+class ReplicatedLinearNoBias(torch.nn.Module):
+    """Replicated linear layer.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_size: output dimension of the linear layer.
+        params_dtype: Data type for the parameters.
+        linear_method: (Maybe quantized) linear method.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: Optional[torch.dtype] = None,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
+        super().__init__()
+
+        # Keep input parameters
+        self.input_size = input_size
+        self.output_size = output_size
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
+        if linear_method is None:
+            linear_method = UnquantizedLinearMethod()
+        self.linear_method = linear_method
+        self.linear_weights = self.linear_method.create_weights(
+            self.input_size, self.output_size, self.input_size,
+            self.output_size, self.params_dtype)
+        for name, weight in self.linear_weights.items():
+            if isinstance(weight, torch.Tensor):
+                self.register_parameter(name, weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output = self.linear_method.apply_weights(self.linear_weights, x, None)
+        return output
 
 class ColumnParallelLinear(torch.nn.Module):
     """Linear layer with column parallelism.
