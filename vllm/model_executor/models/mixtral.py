@@ -29,7 +29,7 @@ import torch
 import torch.nn.functional as F
 
 from torch import nn
-from transformers import MixtralConfig
+from vllm.model_executor.models.configuration_skywork_moe import SkyworkMoeConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.attention import PagedAttention
@@ -92,20 +92,24 @@ class MixtralMLP(nn.Module):
         current_hidden_states, _ = self.w2(current_hidden_states)
         return current_hidden_states
 
+MOE_TOP_K = 2
 
 class MixtralMoE(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: SkyworkMoeConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
         self.rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_total_experts = config.num_local_experts
-        self.top_k = config.num_experts_per_tok
+        self.num_total_experts = config.num_experts[0]
+        self.top_k = MOE_TOP_K
+        self.moe_use_mixtral_gating = config.moe_use_mixtral_gating
+        self.moe_use_logits_norm = config.moe_use_logits_norm
+        self.moe_gate_norm_std = config.moe_gate_norm_std
         if self.tp_size > self.num_total_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -125,10 +129,16 @@ class MixtralMoE(nn.Module):
             if idx in self.expert_indicies else None
             for idx in range(self.num_total_experts)
         ])
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     self.num_total_experts,
-                                     bias=False,
-                                     linear_method=None)
+        if config.moe_2layer_gate:
+            self.gate = torch.nn.Sequential(
+                ReplicatedLinear(config.hidden_size, self.num_total_experts * 8, bias=False).float(),
+                torch.nn.Tanh(),
+                ReplicatedLinear(self.num_total_experts * 8, self.num_total_experts, bias=False).float()).float()
+        else:
+            self.gate = ReplicatedLinear(config.hidden_size,
+                                        self.num_total_experts,
+                                        bias=False,
+                                        linear_method=None)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
@@ -136,11 +146,21 @@ class MixtralMoE(nn.Module):
         # router_logits: (batch * sequence_length, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights,
-                                                       self.top_k,
-                                                       dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        if self.moe_use_mixtral_gating:
+            routing_weights, selected_experts = torch.topk(router_logits, k=MOE_TOP_K, dim=1)
+            routing_weights = F.softmax(routing_weights, dim=1)
+        else:
+            target_std = self.moe_gate_norm_std
+            if self.moe_use_logits_norm:
+                logits_std = router_logits.std(dim=1, keepdim=True)
+                routing_weights = F.softmax(router_logits / (logits_std / target_std), dim=1)
+            else:
+                routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+
+            routing_weights, selected_experts = torch.topk(routing_weights,
+                                                        self.top_k,
+                                                        dim=-1)
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
         final_hidden_states = None
         for expert_idx in self.expert_indicies:
@@ -242,7 +262,7 @@ class MixtralDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: SkyworkMoeConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -255,7 +275,7 @@ class MixtralDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
-            sliding_window=config.sliding_window,
+            sliding_window=4096, # TODO(BBuf): add sliding_window 
             linear_method=linear_method)
         self.block_sparse_moe = MixtralMoE(config=config,
                                            linear_method=linear_method)
@@ -297,7 +317,7 @@ class MixtralModel(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: SkyworkMoeConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -336,7 +356,7 @@ class MixtralForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: SkyworkMoeConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
