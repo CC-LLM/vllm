@@ -3,6 +3,8 @@ import copy
 import enum
 from typing import Dict, List, Optional, Union
 
+import torch
+
 from vllm.block import LogicalTokenBlock
 from vllm.sampling_params import SamplingParams
 
@@ -64,6 +66,8 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
     ) -> None:
+        if isinstance(prompt_token_ids, torch.Tensor):
+            prompt_token_ids = prompt_token_ids.tolist()
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
