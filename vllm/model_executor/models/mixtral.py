@@ -140,7 +140,7 @@ class MixtralMoE(nn.Module):
             self.gate = ReplicatedLinear(config.hidden_size,
                                         self.num_total_experts,
                                         bias=False,
-                                        linear_method=None)
+                                        linear_method=None).float()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, sequence_length, hidden_dim = hidden_states.shape
