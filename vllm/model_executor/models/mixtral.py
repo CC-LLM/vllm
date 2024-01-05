@@ -153,6 +153,10 @@ class MixtralMoE(nn.Module):
             router_logits, _ = self.gate(hidden_states_fp32)
 
         if self.moe_use_mixtral_gating:
+            if self.moe_use_logits_norm:
+                target_std = self.moe_gate_norm_std
+                logits_std = router_logits.std(dim=1, keepdim=True)
+                router_logits = router_logits / (logits_std / target_std)
             routing_weights, selected_experts = torch.topk(router_logits, k=MOE_TOP_K, dim=1)
             routing_weights = F.softmax(routing_weights, dim=1)
         else:
