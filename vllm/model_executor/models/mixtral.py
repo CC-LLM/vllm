@@ -124,6 +124,8 @@ class MixtralConfig(PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
     across all ranks.
@@ -331,16 +333,16 @@ class MixtralMoE(nn.Module):
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
 
         final_hidden_states = fused_experts(hidden_states,
-                                        self.w_up_proj_weight,
-                                        self.w_down_proj_weight,
+                                        self.w13_weight,
+                                        self.w2_weight,
                                         routing_weights,
                                         routing_ids,
                                         inplace=True,
                                         use_fp8=self.use_fp8,
-                                        w1_scale=self.w_up_proj_scale,
-                                        w2_scale=self.w_down_proj_scale,
-                                        a1_scale=self.a_up_proj_scale,
-                                        a_down_proj_scale=self.a_down_proj_scale)
+                                        w1_scale=self.w13_scale,
+                                        w2_scale=self.w2_scale,
+                                        a1_scale=self.a13_scale,
+                                        a2_scale=self.a2_scale)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
