@@ -57,7 +57,6 @@ _GENERATION_MODELS = {
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
-    "SkyworkMoeForCausalLM": ("skywork", "SkyworkMoeForCausalLM"),
 }
 
 _EMBEDDING_MODELS = {
@@ -82,8 +81,6 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS = {
     "Sliding window attention is not yet supported in ROCm's flash attention",
     "MixtralForCausalLM":
     "Sliding window attention is not yet supported in ROCm's flash attention",
-    "SkyworkMoeForCausalLM":
-        "Sliding window attention is not yet supported in ROCm's flash attention",
 }
 
 
