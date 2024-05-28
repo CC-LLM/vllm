@@ -21,11 +21,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
-from torch import nn
-from transformers import MixtralConfig
+import torch.nn.functional as F
+from torch import nn, Tensor
+
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
@@ -33,7 +35,7 @@ from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
@@ -52,7 +54,76 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
+TOPK = 2
+class MixtralConfig(PretrainedConfig):
+    model_type: str = 'mixtral'
+    keys_to_ignore_at_inference: List[str] = ['past_key_values']
 
+    def __init__(
+            self,
+            vocab_size: int = 32000,
+            hidden_size: int = 4096,
+            intermediate_size: int = 11008,
+            num_hidden_layers: int = 32,
+            num_attention_heads: int = 32,
+            num_key_value_heads: Optional[int] = None,
+            hidden_act: str = 'silu',
+            max_position_embeddings: int = 2048,
+            initializer_range: float = 0.02,
+            rms_norm_eps: float = 1e-6,
+            use_cache: bool = True,
+            pad_token_id: Optional[int] = None,
+            bos_token_id: int = 1,
+            eos_token_id: int = 2,
+            pretraining_tp: int = 1,
+            tie_word_embeddings: bool = False,
+            rope_theta: Union[int, float] = 10000.0,
+            rope_scaling: Optional[float] = None,
+            num_experts: List[int] = [32],
+            moe_expert_interval: int = 1,
+            moe_use_mixtral_gating: bool = False,
+            moe_2layer_gate: bool = True,
+            moe_use_logits_norm: bool = False,
+            moe_gate_norm_std: float = 1.0,
+            moe_feature_no_mul_topk: bool = False,
+
+            **kwargs,
+    ) -> None:
+        self.vocab_size = vocab_size
+        self.max_position_embeddings = max_position_embeddings
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+
+        # for backward compatibility
+        if num_key_value_heads is None:
+            num_key_value_heads = num_attention_heads
+
+        self.num_key_value_heads = num_key_value_heads
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.rms_norm_eps = rms_norm_eps
+        self.pretraining_tp = pretraining_tp
+        self.use_cache = use_cache
+        self.rope_theta = rope_theta
+        self.rope_scaling = rope_scaling
+        self._rope_scaling_validation()
+        self.num_experts = num_experts
+        self.moe_expert_interval = moe_expert_interval
+        self.moe_use_mixtral_gating = moe_use_mixtral_gating
+        self.moe_2layer_gate = moe_2layer_gate
+        self.moe_use_logits_norm = moe_use_logits_norm
+        self.moe_gate_norm_std = moe_gate_norm_std
+        self.moe_feature_no_mul_topk = moe_feature_no_mul_topk
+
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
     across all ranks.
@@ -70,6 +141,7 @@ class MixtralMoE(nn.Module):
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
         tp_size: Optional[int] = None,
+        config: Optional[MixtralConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -78,6 +150,7 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.config = config
         self.quant_config = quant_config
 
         # FIXME(pcmoritz): Make this more general to support different
@@ -89,11 +162,24 @@ class MixtralMoE(nn.Module):
         self.params_dtype = params_dtype
 
         # Gate always runs at half / full precision for now.
-        self.gate = ReplicatedLinear(self.hidden_size,
-                                     self.num_total_experts,
-                                     bias=False,
-                                     params_dtype=self.params_dtype,
-                                     quant_config=None)
+        if config.moe_2layer_gate:
+            middle_dim = self.num_total_experts * 8
+            self.gate = nn.ModuleList(
+                [ReplicatedLinear(self.hidden_dim,
+                                  middle_dim,
+                                  bias=False,
+                                  quant_config=None),
+                 nn.Tanh(),
+                 ReplicatedLinear(middle_dim,
+                                  self.num_experts,
+                                  bias=False,
+                                  quant_config=None)])
+        else:
+            self.gate = ReplicatedLinear(self.hidden_size,
+                                        self.num_total_experts,
+                                        bias=False,
+                                        params_dtype=self.params_dtype,
+                                        quant_config=None)
 
         if self.use_fp8 and self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -224,18 +310,37 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = fused_moe(hidden_states,
-                                        self.w13_weight,
-                                        self.w2_weight,
-                                        router_logits,
-                                        self.top_k,
-                                        renormalize=True,
+
+        if not (self.config.moe_use_mixtral_gating or self.config.moe_feature_no_mul_topk):
+            hidden_states *= 2
+
+        target_std = self.config.moe_gate_norm_std
+        if self.config.moe_use_mixtral_gating:
+            if self.config.moe_use_logits_norm:
+                router_logits_std = router_logits.std(dim=1, keepdim=True)
+                router_logits = router_logits_std / (router_logits_std / target_std)
+        else:
+            if self.config.moe_use_logits_norm:
+                router_logits_std = router_logits.std(dim=1, keepdim=True)
+                router_logits = router_logits_std / (router_logits_std / target_std)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, routing_ids = torch.topk(routing_weights,
+                                                       self.top_k,
+                                                       dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+
+        final_hidden_states = fused_experts(hidden_states,
+                                        self.w_up_proj_weight,
+                                        self.w_down_proj_weight,
+                                        routing_weights,
+                                        routing_ids,
                                         inplace=True,
                                         use_fp8=self.use_fp8,
-                                        w1_scale=self.w13_scale,
-                                        w2_scale=self.w2_scale,
-                                        a1_scale=self.a13_scale,
-                                        a2_scale=self.a2_scale)
+                                        w1_scale=self.w_up_proj_scale,
+                                        w2_scale=self.w_down_proj_scale,
+                                        a1_scale=self.a_up_proj_scale,
+                                        a_down_proj_scale=self.a_down_proj_scale)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
@@ -351,8 +456,8 @@ class MixtralDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config)
         self.block_sparse_moe = MixtralMoE(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
+            num_experts=config.num_experts[0],
+            top_k=TOPK,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config)
