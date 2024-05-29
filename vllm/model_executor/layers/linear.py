@@ -458,6 +458,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
+def partition_number(total, parts):
+    quotient, remainder = divmod(total, parts)
+    result = [quotient + 1] * remainder + [quotient] * (parts - remainder)
+    return torch.tensor(result)
+
+
 class QKVParallelLinear(ColumnParallelLinear):
     """Linear layers for the attention's QKV transformation.
 
@@ -499,13 +505,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.total_num_kv_heads = total_num_kv_heads
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads = divide(self.total_num_heads, tp_size)
+        tp_rank = get_tensor_model_parallel_rank()
+        self.num_heads = partition_number(self.total_num_heads, tp_size)[tp_rank]
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
             self.num_kv_head_replicas = divide(tp_size,
                                                self.total_num_kv_heads)
         else:
-            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_heads = partition_number(self.total_num_kv_heads, tp_size)[tp_rank]
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
         output_size = (self.num_heads +
@@ -617,11 +624,16 @@ class QKVParallelLinear(ColumnParallelLinear):
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
-            if loaded_shard_id == "q":
-                shard_id = tp_rank
+            assert self.num_kv_head_replicas == 1, self.num_kv_head_replicas
+
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+            if loaded_shard_id == 'q':
+                start_idx = partition_number(self.total_num_heads, tp_size)[:tp_rank].sum() * self.head_size
             else:
-                shard_id = tp_rank // self.num_kv_head_replicas
-            start_idx = shard_id * shard_size
+                assert loaded_shard_id in ['k', 'v']
+                start_idx = partition_number(self.total_num_kv_heads, tp_size)[:tp_rank].sum() * self.head_size
+
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
         # Special case for for AQLM codebooks.
@@ -693,7 +705,9 @@ class RowParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  reduce_results: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 head_dim: Optional[int] = None,
+                 ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
 
@@ -702,7 +716,12 @@ class RowParallelLinear(LinearBase):
 
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, self.tp_size)
+        tp_rank = get_tensor_model_parallel_rank()
+        if head_dim is None:
+            self.input_size_per_partition = divide(input_size, self.tp_size)
+        else:
+            num_heads = divide(input_size, head_dim)
+            self.input_size_per_partition = partition_number(num_heads, self.tp_size)[tp_rank] * head_dim
         assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
