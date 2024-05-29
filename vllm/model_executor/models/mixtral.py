@@ -87,8 +87,11 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
         self.config = config
-        if self.config is not None and not hasattr(self.config, "num_local_experts"):
-            self.config.num_local_experts = self.config.num_experts[0]
+        if self.config is not None:
+            if not hasattr(self.config, "num_local_experts"):
+                self.config.num_local_experts = self.config.num_experts[0]
+            if not hasattr(self.config, "num_experts_per_tok"):
+                self.config.num_experts_per_tok = TOPK
         self.quant_config = quant_config
 
         # FIXME(pcmoritz): Make this more general to support different
@@ -236,9 +239,10 @@ class MixtralMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        target_std = 1
-        router_logits_std = router_logits.std(dim=1, keepdim=True)
-        router_logits /= (router_logits_std / target_std)
+        if not os.getenv("MIXTRAL"):
+            target_std = 1
+            router_logits_std = router_logits.std(dim=1, keepdim=True)
+            router_logits /= (router_logits_std / target_std)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, routing_ids = torch.topk(routing_weights,
