@@ -215,11 +215,11 @@ class ModelConfig:
     ) -> None:
         total_num_attention_heads = self.hf_text_config.num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
-        if total_num_attention_heads % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size}).")
+        # if total_num_attention_heads % tensor_parallel_size != 0:
+        #     raise ValueError(
+        #         f"Total number of attention heads ({total_num_attention_heads})"
+        #         " must be divisible by tensor parallel size "
+        #         f"({tensor_parallel_size}).")
 
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
