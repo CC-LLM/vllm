@@ -97,24 +97,11 @@ class MixtralMoE(nn.Module):
         self.params_dtype = params_dtype
 
         # Gate always runs at half / full precision for now.
-        if False:
-            middle_dim = self.num_total_experts * 8
-            self.gate = nn.ModuleList(
-                [ReplicatedLinear(self.hidden_dim,
-                                  middle_dim,
-                                  bias=False,
-                                  quant_config=None),
-                 nn.Tanh(),
-                 ReplicatedLinear(middle_dim,
-                                  self.num_experts,
-                                  bias=False,
-                                  quant_config=None)])
-        else:
-            self.gate = ReplicatedLinear(self.hidden_size,
-                                        self.num_total_experts,
-                                        bias=False,
-                                        params_dtype=self.params_dtype,
-                                        quant_config=None)
+        self.gate = ReplicatedLinear(self.hidden_size,
+                                    self.num_total_experts,
+                                    bias=False,
+                                    params_dtype=self.params_dtype,
+                                    quant_config=None)
 
         if self.use_fp8 and self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -247,14 +234,8 @@ class MixtralMoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
 
         target_std = 1
-        if False:
-            if self.config.moe_use_logits_norm:
-                router_logits_std = router_logits.std(dim=1, keepdim=True)
-                router_logits = router_logits_std / (router_logits_std / target_std)
-        else:
-            if True:
-                router_logits_std = router_logits.std(dim=1, keepdim=True)
-                router_logits = router_logits_std / (router_logits_std / target_std)
+        router_logits_std = router_logits.std(dim=1, keepdim=True)
+        router_logits /= (router_logits_std / target_std)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, routing_ids = torch.topk(routing_weights,
