@@ -55,75 +55,6 @@ from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
 TOPK = 2
-class MixtralConfig(PretrainedConfig):
-    model_type: str = 'mixtral'
-    keys_to_ignore_at_inference: List[str] = ['past_key_values']
-
-    def __init__(
-            self,
-            vocab_size: int = 32000,
-            hidden_size: int = 4096,
-            intermediate_size: int = 11008,
-            num_hidden_layers: int = 32,
-            num_attention_heads: int = 32,
-            num_key_value_heads: Optional[int] = None,
-            hidden_act: str = 'silu',
-            max_position_embeddings: int = 2048,
-            initializer_range: float = 0.02,
-            rms_norm_eps: float = 1e-6,
-            use_cache: bool = True,
-            pad_token_id: Optional[int] = None,
-            bos_token_id: int = 1,
-            eos_token_id: int = 2,
-            pretraining_tp: int = 1,
-            tie_word_embeddings: bool = False,
-            rope_theta: Union[int, float] = 10000.0,
-            rope_scaling: Optional[float] = None,
-            num_experts: List[int] = [32],
-            moe_expert_interval: int = 1,
-            moe_use_mixtral_gating: bool = False,
-            moe_2layer_gate: bool = True,
-            moe_use_logits_norm: bool = False,
-            moe_gate_norm_std: float = 1.0,
-            moe_feature_no_mul_topk: bool = False,
-
-            **kwargs,
-    ) -> None:
-        self.vocab_size = vocab_size
-        self.max_position_embeddings = max_position_embeddings
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-
-        # for backward compatibility
-        if num_key_value_heads is None:
-            num_key_value_heads = num_attention_heads
-
-        self.num_key_value_heads = num_key_value_heads
-        self.hidden_act = hidden_act
-        self.initializer_range = initializer_range
-        self.rms_norm_eps = rms_norm_eps
-        self.pretraining_tp = pretraining_tp
-        self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
-        self._rope_scaling_validation()
-        self.num_experts = num_experts
-        self.moe_expert_interval = moe_expert_interval
-        self.moe_use_mixtral_gating = moe_use_mixtral_gating
-        self.moe_2layer_gate = moe_2layer_gate
-        self.moe_use_logits_norm = moe_use_logits_norm
-        self.moe_gate_norm_std = moe_gate_norm_std
-        self.moe_feature_no_mul_topk = moe_feature_no_mul_topk
-
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
 
 
 class MixtralMoE(nn.Module):
@@ -164,7 +95,7 @@ class MixtralMoE(nn.Module):
         self.params_dtype = params_dtype
 
         # Gate always runs at half / full precision for now.
-        if config.moe_2layer_gate:
+        if False:
             middle_dim = self.num_total_experts * 8
             self.gate = nn.ModuleList(
                 [ReplicatedLinear(self.hidden_dim,
@@ -313,16 +244,13 @@ class MixtralMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        if not (self.config.moe_use_mixtral_gating or self.config.moe_feature_no_mul_topk):
-            hidden_states *= 2
-
-        target_std = self.config.moe_gate_norm_std
-        if self.config.moe_use_mixtral_gating:
+        target_std = 1
+        if False:
             if self.config.moe_use_logits_norm:
                 router_logits_std = router_logits.std(dim=1, keepdim=True)
                 router_logits = router_logits_std / (router_logits_std / target_std)
         else:
-            if self.config.moe_use_logits_norm:
+            if True:
                 router_logits_std = router_logits.std(dim=1, keepdim=True)
                 router_logits = router_logits_std / (router_logits_std / target_std)
 
