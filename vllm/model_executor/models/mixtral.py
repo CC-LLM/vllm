@@ -22,6 +22,7 @@
 # limitations under the License.
 """Inference-only Mixtral model."""
 from typing import Iterable, List, Optional, Tuple, Union
+import os
 
 import torch
 import torch.nn.functional as F
@@ -86,6 +87,8 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
         self.config = config
+        if self.config is not None and not hasattr(self.config, "num_local_experts"):
+            self.config.num_local_experts = self.config.num_experts[0]
         self.quant_config = quant_config
 
         # FIXME(pcmoritz): Make this more general to support different
@@ -370,7 +373,7 @@ class MixtralDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config)
         self.block_sparse_moe = MixtralMoE(
-            num_experts=config.num_experts[0],
+            num_experts=config.num_local_experts,
             top_k=TOPK,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -547,21 +550,21 @@ class MixtralForCausalLM(nn.Module):
             # (param_name, weight_name, expert_id)
             ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
              f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
-            for expert_id in range(self.config.num_experts[0])
+            for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ] + [
             # These are the weights for the experts
             # (param_name, weight_name, expert_id)
             ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
              f"experts.{expert_id}.{weight_name}.weight", expert_id)
-            for expert_id in range(self.config.num_experts[0])
+            for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ] + [
             # These are the activation scales for the experts
             # (param_name, weight_name, expert_id)
             ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
              f"experts.{expert_id}.{weight_name}.act_scale", expert_id)
-            for expert_id in range(self.config.num_experts[0])
+            for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ]
 
