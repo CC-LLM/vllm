@@ -27,6 +27,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 
+from transformers import MixtralConfig
+
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm import _custom_ops as ops
