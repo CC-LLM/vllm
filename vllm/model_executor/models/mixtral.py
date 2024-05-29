@@ -264,12 +264,6 @@ class MixtralMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
-def partition_number(total, parts):
-    quotient, remainder = divmod(total, parts)
-    result = [quotient + 1] * remainder + [quotient] * (parts - remainder)
-    return torch.tensor(result)
-
-
 class MixtralAttention(nn.Module):
 
     def __init__(
@@ -285,22 +279,19 @@ class MixtralAttention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = num_heads
-        # assert self.total_num_heads % tp_size == 0
-        # self.num_heads = self.total_num_heads // tp_size
-        self.num_heads = partition_number(self.total_num_heads, tp_size)[tp_rank]
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
-            # assert self.total_num_kv_heads % tp_size == 0
-            pass
+            assert self.total_num_kv_heads % tp_size == 0
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = partition_number(self.total_num_kv_heads, tp_size)[tp_rank]
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -329,7 +320,6 @@ class MixtralAttention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
-            head_dim=self.head_dim,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
