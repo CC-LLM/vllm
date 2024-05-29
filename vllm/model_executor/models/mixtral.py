@@ -87,11 +87,6 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
         self.config = config
-        if self.config is not None:
-            if not hasattr(self.config, "num_local_experts"):
-                self.config.num_local_experts = self.config.num_experts[0]
-            if not hasattr(self.config, "num_experts_per_tok"):
-                self.config.num_experts_per_tok = TOPK
         self.quant_config = quant_config
 
         # FIXME(pcmoritz): Make this more general to support different
@@ -496,6 +491,11 @@ class MixtralForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        if self.config is not None:
+            if not hasattr(self.config, "num_local_experts"):
+                self.config.num_local_experts = self.config.num_experts[0]
+            if not hasattr(self.config, "num_experts_per_tok"):
+                self.config.num_experts_per_tok = TOPK
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
