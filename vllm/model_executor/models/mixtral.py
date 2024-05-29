@@ -318,6 +318,7 @@ class MixtralAttention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            head_dim=self.head_dim,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
