@@ -80,6 +80,7 @@ class MixtralConfig(PretrainedConfig):
             rope_theta: Union[int, float] = 10000.0,
             rope_scaling: Optional[float] = None,
             num_experts: List[int] = [32],
+            num_local_experts: Optional[int] = None,
             moe_expert_interval: int = 1,
             moe_use_mixtral_gating: bool = False,
             moe_2layer_gate: bool = True,
@@ -110,6 +111,7 @@ class MixtralConfig(PretrainedConfig):
         self.rope_scaling = rope_scaling
         self._rope_scaling_validation()
         self.num_experts = num_experts
+        self.num_local_experts = num_experts[0]
         self.moe_expert_interval = moe_expert_interval
         self.moe_use_mixtral_gating = moe_use_mixtral_gating
         self.moe_2layer_gate = moe_2layer_gate
