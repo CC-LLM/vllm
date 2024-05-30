@@ -753,6 +753,7 @@ class RowParallelLinear(LinearBase):
 
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.head_dim = head_dim
         tp_rank = get_tensor_model_parallel_rank()
         if head_dim is None:
             self.input_size_per_partition = divide(input_size, self.tp_size)
@@ -788,11 +789,17 @@ class RowParallelLinear(LinearBase):
                                            None)
 
         tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]
-            start_idx = tp_rank * shard_size
+            if self.head_dim is None:
+                start_idx = tp_rank * shard_size
+            else:
+                num_heads = divide(self.input_size, self.head_dim)
+                start_idx = partition_number(num_heads, tp_size)[:tp_rank].sum() * self.head_dim
+
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
 
