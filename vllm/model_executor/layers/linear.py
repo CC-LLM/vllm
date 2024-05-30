@@ -290,6 +290,11 @@ class ColumnParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+        quant_method = getattr(self, "quant_method", None)
+        if quant_method is not None:
+            quant_method.process_weights_after_loading(self)
+            self._processed = True
+
     def forward(self, input_):
         bias = self.bias if not self.skip_bias_add else None
 
@@ -707,6 +712,11 @@ class QKVParallelLinear(ColumnParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
+        quant_method = getattr(self, "quant_method", None)
+        if quant_method is not None:
+            quant_method.process_weights_after_loading(self)
+            self._processed = True
+
 
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
@@ -814,6 +824,11 @@ class RowParallelLinear(LinearBase):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+        quant_method = getattr(self, "quant_method", None)
+        if quant_method is not None:
+            quant_method.process_weights_after_loading(self)
+            self._processed = True
 
     def forward(self, input_):
         # Set up backprop all-reduce.

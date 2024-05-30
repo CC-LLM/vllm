@@ -186,8 +186,12 @@ class MixtralMoE(nn.Module):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
         if "act_scale" in weight_name or "weight_scale" in weight_name:
             param_data[expert_id] = loaded_weight
+        self._process_weights_after_loading()
 
     def process_weights_after_loading(self):
+        pass
+
+    def _process_weights_after_loading(self):
         # Fp8 is the only case where we need to process after loading.
         if not self.use_fp8:
             return
@@ -257,9 +261,18 @@ class MixtralMoE(nn.Module):
                                         a1_scale=self.a13_scale,
                                         a2_scale=self.a2_scale)
 
+
+        rank = torch.distributed.get_rank()
+        tp_world_size = get_tensor_model_parallel_world_size()
+        fn = f"pt/tp{tp_world_size}_moe{get_counter()}_rank{rank}.pt"
+        assert not os.path.exists(fn)
+        # torch.save(final_hidden_states, fn)
+
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
+
+        increment_counter()
 
         return final_hidden_states.view(num_tokens, hidden_size)
 
@@ -348,7 +361,24 @@ class MixtralAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
+        rank = torch.distributed.get_rank()
+        tp_world_size = get_tensor_model_parallel_world_size()
+        fn = f"pt/tp{tp_world_size}_attn{get_counter()}_rank{rank}.pt"
+        assert not os.path.exists(fn)
+        # torch.save(attn_output, fn)
+        fn = f"pt/tp{tp_world_size}_output{get_counter()}_rank{rank}.pt"
+        assert not os.path.exists(fn)
+        # torch.save(output, fn)
         return output
+
+_counter = 0
+def get_counter():
+    return _counter
+
+def increment_counter():
+    global _counter
+    _counter += 1
+    return _counter
 
 
 class MixtralDecoderLayer(nn.Module):
