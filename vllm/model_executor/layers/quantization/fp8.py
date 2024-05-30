@@ -180,8 +180,6 @@ class Fp8LinearMethod(LinearMethodBase):
         if (not hasattr(layer, "process_after_load")
                 or not layer.process_after_load):
             return
-        if hasattr(layer, "_processed") and layer._processed:
-            return
 
         # If checkpoint is fp/bf16 (not serialized fp8), quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
