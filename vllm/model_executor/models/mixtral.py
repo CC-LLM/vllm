@@ -60,6 +60,7 @@ from vllm.utils import print_warning_once, partition_number
 TOPK = 2
 
 save_dir = os.environ['SAVE_DIR']
+os.makedirs(save_dir, exist_ok=True)
 
 
 class MixtralMoE(nn.Module):
