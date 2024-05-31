@@ -261,6 +261,8 @@ class MixtralMoE(nn.Module):
                 final_hidden_states)
         torch.save(final_hidden_states, f'r{rank}_final_hidden_states_{get_counter()}.pt')
 
+        increment_counter()
+
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
