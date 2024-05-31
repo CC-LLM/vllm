@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import partition_number
 
 logger = init_logger(__name__)
 
@@ -456,12 +457,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
-
-
-def partition_number(total, parts):
-    quotient, remainder = divmod(total, parts)
-    result = [quotient + 1] * remainder + [quotient] * (parts - remainder)
-    return torch.tensor(result)
 
 
 class QKVParallelLinear(ColumnParallelLinear):

@@ -660,6 +660,12 @@ def enable_trace_function_call_for_thread() -> None:
         enable_trace_function_call(log_path)
 
 
+def partition_number(total, parts):
+    quotient, remainder = divmod(total, parts)
+    result = [quotient + 1] * remainder + [quotient] * (parts - remainder)
+    return torch.tensor(result)
+
+
 def identity(value: T) -> T:
     return value
 
