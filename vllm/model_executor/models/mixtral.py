@@ -59,6 +59,8 @@ from vllm.utils import print_warning_once, partition_number
 
 TOPK = 2
 
+save_dir = os.environ['SAVE_DIR']
+
 
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
@@ -232,17 +234,17 @@ class MixtralMoE(nn.Module):
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         rank = get_tensor_model_parallel_rank()
-        torch.save(hidden_states, f'r{rank}_hidden_states_moe_input_{get_counter()}.pt')
+        torch.save(hidden_states, f'{save_dir}r{rank}_hidden_states_moe_input_{get_counter()}.pt')
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        torch.save(router_logits, f'r{rank}_router_logits_before_norm_{get_counter()}.pt')
+        torch.save(router_logits, f'{save_dir}r{rank}_router_logits_before_norm_{get_counter()}.pt')
         if hasattr(self.config, "moe_use_logits_norm"):
             target_std = self.config.moe_gate_norm_std
             router_logits_std = router_logits.std(dim=1, keepdim=True)
             router_logits /= (router_logits_std / target_std)
 
-        torch.save(router_logits, f'r{rank}_router_logits_{get_counter()}.pt')
+        torch.save(router_logits, f'{save_dir}r{rank}_router_logits_{get_counter()}.pt')
         final_hidden_states = fused_moe(hidden_states,
                                         self.w13_weight,
                                         self.w2_weight,
@@ -256,11 +258,11 @@ class MixtralMoE(nn.Module):
                                         a1_scale=self.a13_scale,
                                         a2_scale=self.a2_scale)
 
-        torch.save(final_hidden_states, f'r{rank}_final_hidden_states_before_allreduce_{get_counter()}.pt')
+        torch.save(final_hidden_states, f'{save_dir}r{rank}_final_hidden_states_before_allreduce_{get_counter()}.pt')
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
-        torch.save(final_hidden_states, f'r{rank}_final_hidden_states_{get_counter()}.pt')
+        torch.save(final_hidden_states, f'{save_dir}r{rank}_final_hidden_states_{get_counter()}.pt')
 
         increment_counter()
 
@@ -349,12 +351,12 @@ class MixtralAttention(nn.Module):
     ) -> torch.Tensor:
         rank = get_tensor_model_parallel_rank()
         qkv, _ = self.qkv_proj(hidden_states)
-        torch.save(qkv, f'r{rank}_qkv_{get_counter()}.pt')
+        torch.save(qkv, f'{save_dir}r{rank}_qkv_{get_counter()}.pt')
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
-        torch.save(output, f'r{rank}_output_{get_counter()}.pt')
+        torch.save(output, f'{save_dir}r{rank}_output_{get_counter()}.pt')
         return output
 
 _counter = 0
@@ -407,8 +409,8 @@ class MixtralDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         rank = get_tensor_model_parallel_rank()
-        torch.save(hidden_states, f'r{rank}_hidden_states_before_input_layernorm_{get_counter()}.pt')
-        torch.save(residual, f'r{rank}_residual_before_input_layernorm_{get_counter()}.pt')
+        torch.save(hidden_states, f'{save_dir}r{rank}_hidden_states_before_input_layernorm_{get_counter()}.pt')
+        torch.save(residual, f'{save_dir}r{rank}_residual_before_input_layernorm_{get_counter()}.pt')
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -416,8 +418,8 @@ class MixtralDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        torch.save(hidden_states, f'r{rank}_hidden_states_before_attn_{get_counter()}.pt')
-        torch.save(residual, f'r{rank}_residual_before_attn_{get_counter()}.pt')
+        torch.save(hidden_states, f'{save_dir}r{rank}_hidden_states_before_attn_{get_counter()}.pt')
+        torch.save(residual, f'{save_dir}r{rank}_residual_before_attn_{get_counter()}.pt')
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -425,15 +427,15 @@ class MixtralDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
 
-        torch.save(hidden_states, f'r{rank}_hidden_states_after_attn_{get_counter()}.pt')
+        torch.save(hidden_states, f'{save_dir}r{rank}_hidden_states_after_attn_{get_counter()}.pt')
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        torch.save(hidden_states, f'r{rank}_hidden_states_before_moe_{get_counter()}.pt')
-        torch.save(residual, f'r{rank}_residual_{get_counter()}.pt')
+        torch.save(hidden_states, f'{save_dir}r{rank}_hidden_states_before_moe_{get_counter()}.pt')
+        torch.save(residual, f'{save_dir}r{rank}_residual_{get_counter()}.pt')
         hidden_states = self.block_sparse_moe(hidden_states)
-        torch.save(hidden_states, f'r{rank}_hidden_states_after_moe_{get_counter()}.pt')
+        torch.save(hidden_states, f'{save_dir}r{rank}_hidden_states_after_moe_{get_counter()}.pt')
         return hidden_states, residual
 
 
