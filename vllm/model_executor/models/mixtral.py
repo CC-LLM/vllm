@@ -255,7 +255,6 @@ class MixtralMoE(nn.Module):
                                         a1_scale=self.a13_scale,
                                         a2_scale=self.a2_scale)
 
-        torch.save(hidden_states, f'r{rank}_hidden_states_{get_counter()}.pt')
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
