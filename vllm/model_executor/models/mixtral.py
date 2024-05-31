@@ -38,7 +38,7 @@ from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
@@ -234,22 +234,17 @@ class MixtralMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        if not os.getenv("MIXTRAL"):
-            target_std = 1
+        if hasattr(self.config, "moe_use_logits_norm"):
+            target_std = self.config.moe_gate_norm_std
             router_logits_std = router_logits.std(dim=1, keepdim=True)
             router_logits /= (router_logits_std / target_std)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, routing_ids = torch.topk(routing_weights,
-                                                       self.top_k,
-                                                       dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-
-        final_hidden_states = fused_experts(hidden_states,
+        final_hidden_states = fused_moe(hidden_states,
                                         self.w13_weight,
                                         self.w2_weight,
-                                        routing_weights,
-                                        routing_ids,
+                                        router_logits,
+                                        self.top_k,
+                                        renormalize=True,
                                         inplace=True,
                                         use_fp8=self.use_fp8,
                                         w1_scale=self.w13_scale,
@@ -488,6 +483,10 @@ class MixtralForCausalLM(nn.Module):
                 self.config.num_local_experts = self.config.num_experts[0]
             if not hasattr(self.config, "num_experts_per_tok"):
                 self.config.num_experts_per_tok = TOPK
+            if hasattr(self.config, "moe_2layer_gate"):
+                assert not self.config.moe_2layer_gate
+            if hasattr(self.config, "moe_use_mixtral_gating"):
+                assert not self.config.moe_use_mixtral_gating
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
