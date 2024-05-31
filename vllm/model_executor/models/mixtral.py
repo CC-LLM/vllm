@@ -55,7 +55,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
-from vllm.utils import print_warning_once
+from vllm.utils import print_warning_once, partition_number
 
 TOPK = 2
 
@@ -264,12 +264,6 @@ class MixtralMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
-def partition_number(total, parts):
-    quotient, remainder = divmod(total, parts)
-    result = [quotient + 1] * remainder + [quotient] * (parts - remainder)
-    return torch.tensor(result)
-
-
 class MixtralAttention(nn.Module):
 
     def __init__(
@@ -287,8 +281,6 @@ class MixtralAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = num_heads
-        # assert self.total_num_heads % tp_size == 0
-        # self.num_heads = self.total_num_heads // tp_size
         self.num_heads = partition_number(self.total_num_heads, tp_size)[tp_rank]
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
@@ -373,7 +365,7 @@ class MixtralDecoderLayer(nn.Module):
             quant_config=quant_config)
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
-            top_k=TOPK,
+            top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config)
