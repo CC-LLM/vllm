@@ -21,11 +21,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
+import os
 
 import torch
-from torch import nn
+import torch.nn.functional as F
+from torch import nn, Tensor
+
 from transformers import MixtralConfig
+
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
@@ -50,7 +55,9 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
-from vllm.utils import print_warning_once
+from vllm.utils import print_warning_once, partition_number
+
+TOPK = 2
 
 
 class MixtralMoE(nn.Module):
@@ -70,6 +77,7 @@ class MixtralMoE(nn.Module):
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
         tp_size: Optional[int] = None,
+        config: Optional[MixtralConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -78,6 +86,7 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.config = config
         self.quant_config = quant_config
 
         # FIXME(pcmoritz): Make this more general to support different
@@ -90,10 +99,10 @@ class MixtralMoE(nn.Module):
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(self.hidden_size,
-                                     self.num_total_experts,
-                                     bias=False,
-                                     params_dtype=self.params_dtype,
-                                     quant_config=None)
+                                    self.num_total_experts,
+                                    bias=False,
+                                    params_dtype=self.params_dtype,
+                                    quant_config=None)
 
         if self.use_fp8 and self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -224,6 +233,12 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+
+        if hasattr(self.config, "moe_use_logits_norm"):
+            target_std = self.config.moe_gate_norm_std
+            router_logits_std = router_logits.std(dim=1, keepdim=True)
+            router_logits /= (router_logits_std / target_std)
+
         final_hidden_states = fused_moe(hidden_states,
                                         self.w13_weight,
                                         self.w2_weight,
@@ -259,19 +274,20 @@ class MixtralAttention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
+        self.num_heads = partition_number(self.total_num_heads, tp_size)[tp_rank]
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
+            # assert self.total_num_kv_heads % tp_size == 0
+            pass
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.num_kv_heads = partition_number(self.total_num_kv_heads, tp_size)[tp_rank]
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -300,6 +316,7 @@ class MixtralAttention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            head_dim=self.head_dim,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -470,6 +487,15 @@ class MixtralForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        if self.config is not None:
+            if not hasattr(self.config, "num_local_experts"):
+                self.config.num_local_experts = self.config.num_experts[0]
+            if not hasattr(self.config, "num_experts_per_tok"):
+                self.config.num_experts_per_tok = TOPK
+            if hasattr(self.config, "moe_2layer_gate"):
+                assert not self.config.moe_2layer_gate
+            if hasattr(self.config, "moe_use_mixtral_gating"):
+                assert not self.config.moe_use_mixtral_gating
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
@@ -549,6 +575,8 @@ class MixtralForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            if name.endswith('.act_scale') and self.model.quant_config.activation_scheme == 'dynamic':
                 continue
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
