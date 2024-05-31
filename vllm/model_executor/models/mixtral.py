@@ -487,6 +487,7 @@ class MixtralForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        self.quant_config = quant_config
         if self.config is not None:
             if not hasattr(self.config, "num_local_experts"):
                 self.config.num_local_experts = self.config.num_experts[0]
@@ -576,7 +577,7 @@ class MixtralForCausalLM(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if name.endswith('.act_scale') and self.model.quant_config.activation_scheme == 'dynamic':
+            if name.endswith('.act_scale') and self.quant_config.activation_scheme == 'dynamic':
                 continue
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
