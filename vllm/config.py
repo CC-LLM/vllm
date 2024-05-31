@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
+from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron, partition_number
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size
                               )
@@ -21,11 +21,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
 
 logger = init_logger(__name__)
-
-def partition_number(total, parts):
-    quotient, remainder = divmod(total, parts)
-    result = [quotient + 1] * remainder + [quotient] * (parts - remainder)
-    return torch.tensor(result)
 
 _GB = 1 << 30
 _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
