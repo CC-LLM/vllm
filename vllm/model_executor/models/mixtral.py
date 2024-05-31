@@ -411,6 +411,8 @@ class MixtralDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+        rank = get_tensor_model_parallel_rank()
+        torch.save(hidden_states, f'r{rank}_hidden_states_before_attn_{get_counter()}.pt')
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -421,6 +423,8 @@ class MixtralDecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+        torch.save(hidden_states, f'r{rank}_hidden_states_before_moe_{get_counter()}.pt')
+        torch.save(residual, f'r{rank}_residual_{get_counter()}.pt')
         hidden_states = self.block_sparse_moe(hidden_states)
         return hidden_states, residual
 
