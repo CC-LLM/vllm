@@ -232,10 +232,11 @@ class MixtralMoE(nn.Module):
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         rank = get_tensor_model_parallel_rank()
-        torch.save(hidden_states, f'r{rank}_hidden_states_{get_counter()}.pt')
+        torch.save(hidden_states, f'r{rank}_hidden_states_moe_input_{get_counter()}.pt')
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
+        torch.save(router_logits, f'r{rank}_router_logits_before_norm_{get_counter()}.pt')
         if hasattr(self.config, "moe_use_logits_norm"):
             target_std = self.config.moe_gate_norm_std
             router_logits_std = router_logits.std(dim=1, keepdim=True)
@@ -405,6 +406,9 @@ class MixtralDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        rank = get_tensor_model_parallel_rank()
+        torch.save(hidden_states, f'r{rank}_hidden_states_before_input_layernorm_{get_counter()}.pt')
+        torch.save(residual, f'r{rank}_residual_before_input_layernorm_{get_counter()}.pt')
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -412,8 +416,8 @@ class MixtralDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        rank = get_tensor_model_parallel_rank()
         torch.save(hidden_states, f'r{rank}_hidden_states_before_attn_{get_counter()}.pt')
+        torch.save(residual, f'r{rank}_residual_before_attn_{get_counter()}.pt')
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -421,12 +425,15 @@ class MixtralDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
 
+        torch.save(hidden_states, f'r{rank}_hidden_states_after_attn_{get_counter()}.pt')
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         torch.save(hidden_states, f'r{rank}_hidden_states_before_moe_{get_counter()}.pt')
         torch.save(residual, f'r{rank}_residual_{get_counter()}.pt')
         hidden_states = self.block_sparse_moe(hidden_states)
+        torch.save(hidden_states, f'r{rank}_hidden_states_after_moe_{get_counter()}.pt')
         return hidden_states, residual
 
 
