@@ -231,6 +231,8 @@ class MixtralMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
+        rank = get_tensor_model_parallel_rank()
+        torch.save(hidden_states, f'r{rank}_hidden_states_{get_counter()}.pt')
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
@@ -239,6 +241,7 @@ class MixtralMoE(nn.Module):
             router_logits_std = router_logits.std(dim=1, keepdim=True)
             router_logits /= (router_logits_std / target_std)
 
+        torch.save(router_logits, f'r{rank}_router_logits_{get_counter()}.pt')
         final_hidden_states = fused_moe(hidden_states,
                                         self.w13_weight,
                                         self.w2_weight,
@@ -252,9 +255,11 @@ class MixtralMoE(nn.Module):
                                         a1_scale=self.a13_scale,
                                         a2_scale=self.a2_scale)
 
+        torch.save(hidden_states, f'r{rank}_hidden_states_{get_counter()}.pt')
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
+        torch.save(final_hidden_states, f'r{rank}_final_hidden_states_{get_counter()}.pt')
 
         return final_hidden_states.view(num_tokens, hidden_size)
 
@@ -339,12 +344,24 @@ class MixtralAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        rank = get_tensor_model_parallel_rank()
         qkv, _ = self.qkv_proj(hidden_states)
+        torch.save(qkv, f'r{rank}_qkv_{get_counter()}.pt')
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
+        torch.save(output, f'r{rank}_output_{get_counter()}.pt')
         return output
+
+_counter = 0
+
+def get_counter():
+    return _counter
+
+def increment_counter():
+    global _counter
+    _counter += 1
 
 
 class MixtralDecoderLayer(nn.Module):
