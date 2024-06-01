@@ -628,6 +628,8 @@ class QKVParallelLinear(ColumnParallelLinear):
             else:
                 assert loaded_shard_id in ['k', 'v']
                 start_idx = partition_number(self.total_num_kv_heads, tp_size)[:tp_rank].sum() * self.head_size
+            if packed_dim == output_dim:
+                start_idx = start_idx // param.pack_factor
 
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
