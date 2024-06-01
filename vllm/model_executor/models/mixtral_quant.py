@@ -132,6 +132,11 @@ class MixtralMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
+        if hasattr(self.config, "moe_use_logits_norm"):
+            target_std = self.config.moe_gate_norm_std
+            router_logits_std = router_logits.std(dim=1, keepdim=True)
+            router_logits /= (router_logits_std / target_std)
+
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights,
                                                        self.top_k,
@@ -298,6 +303,18 @@ class MixtralModel(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
+
+        TOPK = 2
+        if config is not None:
+            if not hasattr(config, "num_local_experts"):
+                config.num_local_experts = config.num_experts[0]
+            if not hasattr(config, "num_experts_per_tok"):
+                config.num_experts_per_tok = TOPK
+            if hasattr(config, "moe_2layer_gate"):
+                assert not config.moe_2layer_gate
+            if hasattr(config, "moe_use_mixtral_gating"):
+                assert not config.moe_use_mixtral_gating
+
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
