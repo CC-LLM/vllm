@@ -1,6 +1,6 @@
 # coding=utf-8
 # Adapted from
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
+# Copyright 2024 The Skywork team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -20,14 +20,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Mixtral model."""
+"""Inference-only SkyworkMoE model compatible with HuggingFace weights."""
 from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import MixtralConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
@@ -50,14 +49,14 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
 
-class MixtralMLP(nn.Module):
+class SkyworkMLP(nn.Module):
 
     def __init__(
-        self,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+            self,
+            num_experts: int,
+            hidden_size: int,
+            intermediate_size: int,
+            quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.num_experts = num_experts
@@ -89,12 +88,12 @@ class MixtralMLP(nn.Module):
         return current_hidden_states
 
 
-class MixtralMoE(nn.Module):
+class SkyworkMoE(nn.Module):
 
     def __init__(
-        self,
-        config: MixtralConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+            self,
+            config,
+            quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
@@ -114,7 +113,7 @@ class MixtralMoE(nn.Module):
                 f"Rank {self.rank} has no experts assigned to it.")
 
         self.experts = nn.ModuleList([
-            MixtralMLP(self.num_total_experts,
+            SkyworkMLP(self.num_total_experts,
                        config.hidden_size,
                        config.intermediate_size,
                        quant_config=quant_config)
@@ -131,6 +130,11 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+
+        if hasattr(self.config, "moe_use_logits_norm"):
+            target_std = self.config.moe_gate_norm_std
+            router_logits_std = router_logits.std(dim=1, keepdim=True)
+            router_logits /= (router_logits_std / target_std)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights,
@@ -156,17 +160,17 @@ class MixtralMoE(nn.Module):
             num_tokens, hidden_dim)
 
 
-class MixtralAttention(nn.Module):
+class SkyworkAttention(nn.Module):
 
     def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
-        quant_config: Optional[QuantizationConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
+            self,
+            hidden_size: int,
+            num_heads: int,
+            num_kv_heads: int,
+            max_position: int = 4096 * 32,
+            rope_theta: float = 10000,
+            quant_config: Optional[QuantizationConfig] = None,
+            cache_config: Optional[CacheConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -187,7 +191,7 @@ class MixtralAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
         self.rope_theta = rope_theta
 
         self.qkv_proj = QKVParallelLinear(
@@ -219,11 +223,11 @@ class MixtralAttention(nn.Module):
                               quant_config=quant_config)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -233,19 +237,19 @@ class MixtralAttention(nn.Module):
         return output
 
 
-class MixtralDecoderLayer(nn.Module):
+class SkyworkDecoderLayer(nn.Module):
 
     def __init__(
-        self,
-        config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+            self,
+            config,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
-        self.self_attn = MixtralAttention(
+        self.self_attn = SkyworkAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
@@ -253,7 +257,7 @@ class MixtralDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config)
-        self.block_sparse_moe = MixtralMoE(config=config,
+        self.block_sparse_moe = SkyworkMoE(config=config,
                                            quant_config=quant_config)
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -261,12 +265,12 @@ class MixtralDecoderLayer(nn.Module):
                                                 eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
+            residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -289,15 +293,27 @@ class MixtralDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class MixtralModel(nn.Module):
+class SkyworkModel(nn.Module):
 
     def __init__(
-        self,
-        config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+            self,
+            config,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
+
+        TOPK = 2
+        if config is not None:
+            if not hasattr(config, "num_local_experts"):
+                config.num_local_experts = config.num_experts[0]
+            if not hasattr(config, "num_experts_per_tok"):
+                config.num_experts_per_tok = TOPK
+            if hasattr(config, "moe_2layer_gate"):
+                assert not config.moe_2layer_gate
+            if hasattr(config, "moe_use_mixtral_gating"):
+                assert not config.moe_use_mixtral_gating
+
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -306,7 +322,7 @@ class MixtralModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            MixtralDecoderLayer(config,
+            SkyworkDecoderLayer(config,
                                 cache_config,
                                 quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
@@ -314,11 +330,11 @@ class MixtralModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            kv_caches: List[torch.Tensor],
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -331,29 +347,29 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module):
+class SkyworkForCausalLM(nn.Module):
     fall_back_to_pt_during_load = False
 
     def __init__(
-        self,
-        config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+            self,
+            config,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = MixtralModel(config, cache_config, quant_config)
+        self.model = SkyworkModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            kv_caches: List[torch.Tensor],
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -366,9 +382,9 @@ class MixtralForCausalLM(nn.Module):
         return logits
 
     def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
+            self,
+            logits: Optional[torch.Tensor],
+            sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens

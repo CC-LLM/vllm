@@ -1,6 +1,6 @@
 # coding=utf-8
 # Adapted from
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
+# Copyright 2024 The Skywork team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -20,12 +20,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Mixtral model."""
+"""Inference-only Skywork model compatible with HuggingFace weights."""
+
 from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import MixtralConfig
 
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
@@ -50,11 +50,13 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
-from vllm.utils import print_warning_once
+from vllm.utils import print_warning_once, partition_number
+
+TOPK = 2
 
 
-class MixtralMoE(nn.Module):
-    """A tensor-parallel MoE implementation for Mixtral that shards each expert
+class SkyworkMoE(nn.Module):
+    """A tensor-parallel MoE implementation for Skywork that shards each expert
     across all ranks.
 
     Each expert's weights are sharded across all ranks and a fused MoE
@@ -63,14 +65,15 @@ class MixtralMoE(nn.Module):
     """
 
     def __init__(
-        self,
-        num_experts: int,
-        top_k: int,
-        hidden_size: int,
-        intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
-        tp_size: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+            self,
+            num_experts: int,
+            top_k: int,
+            hidden_size: int,
+            intermediate_size: int,
+            params_dtype: Optional[torch.dtype] = None,
+            tp_size: Optional[int] = None,
+            config=None,
+            quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -78,6 +81,7 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.config = config
         self.quant_config = quant_config
 
         # FIXME(pcmoritz): Make this more general to support different
@@ -150,10 +154,10 @@ class MixtralMoE(nn.Module):
                         "was not serialized fp8.")
                 self.a13_scale = nn.Parameter(torch.zeros(
                     self.num_total_experts, dtype=torch.float32),
-                                              requires_grad=False)
+                    requires_grad=False)
                 self.a2_scale = nn.Parameter(torch.zeros(
                     self.num_total_experts, dtype=torch.float32),
-                                             requires_grad=False)
+                    requires_grad=False)
 
                 set_weight_attrs(self.a13_scale, {
                     "weight_loader": self.weight_loader,
@@ -172,7 +176,7 @@ class MixtralMoE(nn.Module):
             param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w3.weight"):
             param_data[expert_id,
-                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
+            shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
         if "act_scale" in weight_name or "weight_scale" in weight_name:
@@ -192,10 +196,10 @@ class MixtralMoE(nn.Module):
             for expert in range(self.num_total_experts):
                 w13_weight[expert, :, :], self.w13_scale[
                     expert] = ops.scaled_fp8_quant(
-                        self.w13_weight.data[expert, :, :])
+                    self.w13_weight.data[expert, :, :])
                 w2_weight[expert, :, :], self.w2_scale[
                     expert] = ops.scaled_fp8_quant(
-                        self.w2_weight.data[expert, :, :])
+                    self.w2_weight.data[expert, :, :])
             self.w13_weight = nn.Parameter(w13_weight, requires_grad=False)
             self.w2_weight = nn.Parameter(w2_weight, requires_grad=False)
 
@@ -224,6 +228,12 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+
+        if hasattr(self.config, "moe_use_logits_norm"):
+            target_std = self.config.moe_gate_norm_std
+            router_logits_std = router_logits.std(dim=1, keepdim=True)
+            router_logits /= (router_logits_std / target_std)
+
         final_hidden_states = fused_moe(hidden_states,
                                         self.w13_weight,
                                         self.w2_weight,
@@ -244,39 +254,49 @@ class MixtralMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
-class MixtralAttention(nn.Module):
+class SkyworkAttention(nn.Module):
 
     def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+            self,
+            hidden_size: int,
+            num_heads: int,
+            num_kv_heads: int,
+            max_position: int = 4096 * 32,
+            rope_theta: float = 10000,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
+        self.num_heads = partition_number(self.total_num_heads, tp_size)[tp_rank]
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
+            # assert self.total_num_kv_heads % tp_size == 0
+            pass
         else:
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.num_kv_heads = partition_number(self.total_num_kv_heads, tp_size)[tp_rank]
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
         self.rope_theta = rope_theta
+
+        if isinstance(
+                quant_config,
+                Fp8Config) and not quant_config.is_checkpoint_fp8_serialized:
+            print_warning_once(
+                "For Skywork FP8 quantization, we currently do not quantize "
+                "the attention layers until their FP8 performance is improved."
+            )
+            quant_config = None
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -291,6 +311,7 @@ class MixtralAttention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            head_dim=self.head_dim,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -307,11 +328,11 @@ class MixtralAttention(nn.Module):
                               quant_config=quant_config)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -321,19 +342,19 @@ class MixtralAttention(nn.Module):
         return output
 
 
-class MixtralDecoderLayer(nn.Module):
+class SkyworkDecoderLayer(nn.Module):
 
     def __init__(
-        self,
-        config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+            self,
+            config,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
-        self.self_attn = MixtralAttention(
+        self.self_attn = SkyworkAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
@@ -341,7 +362,7 @@ class MixtralDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config)
-        self.block_sparse_moe = MixtralMoE(
+        self.block_sparse_moe = SkyworkMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -353,12 +374,12 @@ class MixtralDecoderLayer(nn.Module):
                                                 eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
+            residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -381,14 +402,14 @@ class MixtralDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class MixtralModel(nn.Module):
+class SkyworkModel(nn.Module):
 
     def __init__(
-        self,
-        config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+            self,
+            config,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None,
+            lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.padding_idx = config.pad_token_id
@@ -403,7 +424,7 @@ class MixtralModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            MixtralDecoderLayer(config,
+            SkyworkDecoderLayer(config,
                                 cache_config,
                                 quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
@@ -411,11 +432,11 @@ class MixtralModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            kv_caches: List[torch.Tensor],
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -428,7 +449,7 @@ class MixtralModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module):
+class SkyworkForCausalLM(nn.Module):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -453,15 +474,25 @@ class MixtralForCausalLM(nn.Module):
     embedding_padding_modules = ["lm_head"]
 
     def __init__(
-        self,
-        config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+            self,
+            config,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None,
+            lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.model = MixtralModel(config,
+        self.quant_config = quant_config
+        if self.config is not None:
+            if not hasattr(self.config, "num_local_experts"):
+                self.config.num_local_experts = self.config.num_experts[0]
+            if not hasattr(self.config, "num_experts_per_tok"):
+                self.config.num_experts_per_tok = TOPK
+            if hasattr(self.config, "moe_2layer_gate"):
+                assert not self.config.moe_2layer_gate
+            if hasattr(self.config, "moe_use_Skywork_gating"):
+                assert not self.config.moe_use_mixtral_gating
+        self.model = SkyworkModel(config,
                                   cache_config,
                                   quant_config,
                                   lora_config=lora_config)
@@ -482,11 +513,11 @@ class MixtralForCausalLM(nn.Module):
         self.sampler = Sampler()
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+            self,
+            input_ids: torch.Tensor,
+            positions: torch.Tensor,
+            kv_caches: List[torch.Tensor],
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -499,9 +530,9 @@ class MixtralForCausalLM(nn.Module):
         return logits
 
     def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
+            self,
+            logits: Optional[torch.Tensor],
+            sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
@@ -515,31 +546,33 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
-            # These are the weight scales for the experts
-            # (param_name, weight_name, expert_id)
-            ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
-             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
-        ] + [
-            # These are the weights for the experts
-            # (param_name, weight_name, expert_id)
-            ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
-             f"experts.{expert_id}.{weight_name}.weight", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
-        ] + [
-            # These are the activation scales for the experts
-            # (param_name, weight_name, expert_id)
-            ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
-             f"experts.{expert_id}.{weight_name}.act_scale", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
-        ]
+                                    # These are the weight scales for the experts
+                                    # (param_name, weight_name, expert_id)
+                                    ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
+                                     f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
+                                    for expert_id in range(self.config.num_local_experts)
+                                    for weight_name in ["w1", "w2", "w3"]
+                                ] + [
+                                    # These are the weights for the experts
+                                    # (param_name, weight_name, expert_id)
+                                    ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
+                                     f"experts.{expert_id}.{weight_name}.weight", expert_id)
+                                    for expert_id in range(self.config.num_local_experts)
+                                    for weight_name in ["w1", "w2", "w3"]
+                                ] + [
+                                    # These are the activation scales for the experts
+                                    # (param_name, weight_name, expert_id)
+                                    ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
+                                     f"experts.{expert_id}.{weight_name}.act_scale", expert_id)
+                                    for expert_id in range(self.config.num_local_experts)
+                                    for weight_name in ["w1", "w2", "w3"]
+                                ]
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
+                continue
+            if name.endswith('.act_scale') and self.quant_config.activation_scheme == 'dynamic':
                 continue
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
