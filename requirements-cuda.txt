@@ -4,3 +4,6 @@
 # Dependencies for NVIDIA GPUs
 ray >= 2.9
 nvidia-ml-py # for pynvml package
+torch
+xformers
+vllm-flash-attn
