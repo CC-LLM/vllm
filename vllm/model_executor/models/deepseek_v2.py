@@ -28,6 +28,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -197,6 +198,7 @@ class DeepseekV2Attention(nn.Module):
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         layer_idx=None,
     ) -> None:
@@ -276,7 +278,9 @@ class DeepseekV2Attention(nn.Module):
         self.attn = Attention(self.num_local_heads,
                               256,
                               self.scaling,
-                              num_kv_heads=self.num_local_heads)
+                              num_kv_heads=self.num_local_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -333,6 +337,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         layer_idx: int,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -354,6 +359,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
+            cache_config=cache_config,
             quant_config=quant_config,
             layer_idx=layer_idx,
         )
@@ -409,9 +415,12 @@ class DeepseekV2Model(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
+        assert lora_config is None, "vllm do not support lora_config in DeepseekV2Model"
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -422,6 +431,7 @@ class DeepseekV2Model(nn.Module):
         self.layers = nn.ModuleList([
             DeepseekV2DecoderLayer(config,
                                    layer_idx,
+                                   cache_config=cache_config,
                                    quant_config=quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
@@ -450,12 +460,14 @@ class DeepseekV2ForCausalLM(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = DeepseekV2Model(config, quant_config)
+        self.model = DeepseekV2Model(config, cache_config, quant_config, lora_config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
