@@ -530,6 +530,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         beta_slow: float = 1,
         mscale: float = 1,
         mscale_all_dim: float = 0,
+        dtype: torch.dtype = torch.get_default_dtype()
     ) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
@@ -542,7 +543,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
             attn_factor)
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
-                         is_neox_style)
+                         is_neox_style, dtype)
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
         pos_freqs = self.base**(torch.arange(
