@@ -21,11 +21,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
+import os
 
 import torch
-from torch import nn
+import torch.nn.functional as F
+from torch import nn, Tensor
+
 from transformers import MixtralConfig
+
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
@@ -33,7 +38,7 @@ from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
@@ -54,6 +59,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
+TOPK = 2
+
 
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
@@ -72,6 +79,7 @@ class MixtralMoE(nn.Module):
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
         tp_size: Optional[int] = None,
+        config: Optional[MixtralConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -80,6 +88,7 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.config = config
         self.quant_config = quant_config
 
         # FIXME(pcmoritz): Make this more general to support different
@@ -92,10 +101,10 @@ class MixtralMoE(nn.Module):
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(self.hidden_size,
-                                     self.num_total_experts,
-                                     bias=False,
-                                     params_dtype=self.params_dtype,
-                                     quant_config=None)
+                                    self.num_total_experts,
+                                    bias=False,
+                                    params_dtype=self.params_dtype,
+                                    quant_config=None)
 
         if self.use_fp8 and self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -268,12 +277,23 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = fused_moe(hidden_states,
+
+        if not os.getenv("MIXTRAL"):
+            target_std = 1
+            router_logits_std = router_logits.std(dim=1, keepdim=True)
+            router_logits /= (router_logits_std / target_std)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, routing_ids = torch.topk(routing_weights,
+                                                       self.top_k,
+                                                       dim=-1)
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+
+        final_hidden_states = fused_experts(hidden_states,
                                         self.w13_weight,
                                         self.w2_weight,
-                                        router_logits,
-                                        self.top_k,
-                                        renormalize=True,
+                                        routing_weights,
+                                        routing_ids,
                                         inplace=True,
                                         use_fp8=self.use_fp8,
                                         w1_scale=self.w13_scale,
@@ -387,7 +407,7 @@ class MixtralDecoderLayer(nn.Module):
             quant_config=quant_config)
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
+            top_k=TOPK,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config)
@@ -505,6 +525,11 @@ class MixtralForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
+        if self.config is not None:
+            if not hasattr(self.config, "num_local_experts"):
+                self.config.num_local_experts = self.config.num_experts[0]
+            if not hasattr(self.config, "num_experts_per_tok"):
+                self.config.num_experts_per_tok = TOPK
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
