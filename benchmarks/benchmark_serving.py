@@ -427,6 +427,11 @@ def main(args: argparse.Namespace):
                               for prompt, prompt_formatted, prompt_len,
                               output_len in input_requests]
 
+    elif args.dataset_name is None:
+        # Synthesize a prompt with the given input length.
+        prompt = "hi" * (args.input_len - 1)
+        input_requests = [(prompt, args.input_len, args.output_len)
+                    for _ in range(args.num_prompts)]
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
 
@@ -517,7 +522,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset-name",
         type=str,
-        default="sharegpt",
+        default=None,
         choices=["sharegpt", "sonnet"],
         help="Name of the dataset to benchmark on.",
     )
@@ -618,6 +623,15 @@ if __name__ == "__main__":
         help="Specify directory to save benchmark json results."
         "If not specified, results are saved in the current directory.",
     )
+    parser.add_argument("--input-len",
+                        type=int,
+                        default=None,
+                        help="Input prompt length for each request")
+    parser.add_argument("--output-len",
+                        type=int,
+                        default=None,
+                        help="Output length for each request. Overrides the "
+                        "output length from the dataset.")
 
     args = parser.parse_args()
     main(args)
