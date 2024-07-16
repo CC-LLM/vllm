@@ -21,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -49,6 +49,7 @@ from vllm.sequence import IntermediateTensors, SamplerOutput
 
 from .interfaces import SupportsLoRA
 from .utils import is_pp_missing_parameter, make_layers
+from .configuration_skywork_moe import SkyworkMoeConfig
 
 
 class MixtralMoE(nn.Module):
@@ -68,9 +69,14 @@ class MixtralMoE(nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  tp_size: Optional[int] = None,
+                 moe_use_logits_norm: bool = False,
+                 moe_gate_norm_std: int = 1,
                  prefix: str = ""):
         super().__init__()
         self.hidden_size = hidden_size
+
+        self.moe_use_logits_norm = moe_use_logits_norm
+        self.moe_gate_norm_std = moe_gate_norm_std
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(hidden_size,
@@ -97,6 +103,12 @@ class MixtralMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+
+        if self.moe_use_logits_norm:
+            target_std = self.moe_gate_norm_std
+            logits_std = router_logits.std(dim=1, keepdim=True)
+            router_logits = router_logits / (logits_std / target_std)
+
         final_hidden_states = self.experts(hidden_states, router_logits)
         return final_hidden_states.view(orig_shape)
 
@@ -209,6 +221,8 @@ class MixtralDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
+            moe_use_logits_norm=config.moe_use_logits_norm if isinstance(config, SkyworkMoeConfig) else False,
+            moe_gate_norm_std=config.moe_gate_norm_std if isinstance(config, SkyworkMoeConfig) else 1,
             prefix=f"{prefix}.block_sparse_moe")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -248,7 +262,7 @@ class MixtralModel(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: Union[MixtralConfig, SkyworkMoeConfig],
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
@@ -331,7 +345,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: Union[MixtralConfig, SkyworkMoeConfig],
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
@@ -340,6 +354,16 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
 
         self.config = config
         self.lora_config = lora_config
+
+        if self.config is not None:
+            if not hasattr(self.config, "num_local_experts"):
+                self.config.num_local_experts = self.config.num_experts[0]
+            if not hasattr(self.config, "num_experts_per_tok"):
+                self.config.num_experts_per_tok = 2
+            if hasattr(self.config, "moe_2layer_gate"):
+                assert not self.config.moe_2layer_gate
+            if hasattr(self.config, "moe_use_Skywork_gating"):
+                assert not self.config.moe_use_mixtral_gating
 
         self.model = MixtralModel(config,
                                   cache_config,

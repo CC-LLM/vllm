@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.21)
 
 project(vllm_extensions LANGUAGES CXX)
 
+find_program(CCACHE_FOUND ccache)
+if (CCACHE_FOUND)
+set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK ccache)
+endif (CCACHE_FOUND)
+
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
 
